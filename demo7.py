@@ -2,28 +2,13 @@
 # @Time : 2025/2/21 16:39
 
 import os
-from datetime import datetime
-from operator import itemgetter
+from typing import Optional, List
 
-import bs4
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.history_aware_retriever import create_history_aware_retriever
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain.chains.sql_database.query import create_sql_query_chain
-from langchain.indexes import vectorstore
-from langchain_chroma import Chroma
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
-from langchain_community.document_loaders import WebBaseLoader, YoutubeLoader
-from langchain_community.tools import QuerySQLDataBaseTool
-from langchain_community.utilities import SQLDatabase
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
-from langchain_core.runnables import RunnableWithMessageHistory, RunnablePassthrough
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langgraph.prebuilt import chat_agent_executor
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from pydantic.v1 import BaseModel, Field
 
 os.environ['http_proxy'] = '127.0.0.1:7890'
 os.environ['https_proxy'] = '127.0.0.1:7890'
@@ -35,7 +20,7 @@ os.environ["LANGCHAIN_API_KEY"] = 'lsv2_pt_62f896a00146437195e85fc93fa8b91b_e79f
 
 # 聊天机器人案例
 # 创建模型
-# model = ChatOpenAI(model='gpt-4-turbo')
+model = ChatOpenAI(model='gpt-4-turbo')
 embeddings = OpenAIEmbeddings(model='text-embedding-3-small')
 
 persist_dir = 'chroma_data_dir'  # 存放向量数据库的目录
@@ -76,8 +61,55 @@ urls = [
 # # 向量数据库的持久化
 # vectorstore = Chroma.from_documents(split_doc,embeddings,persist_directory=persist_dir)   # 并且把向量数据库持久化到磁盘
 
-#加载磁盘中的向量数据库
-vectorstore = Chroma(persist_directory=persist_dir,embedding_function=)
+# 加载磁盘中的向量数据库
+vectorstore = Chroma(persist_directory=persist_dir, embedding_function=embeddings)
+# result = vectorstore.similarity_search_with_score('how do I build a RAG agent')
+# print(result[0])
+# print(result[0][0].maatedata['publish_year'])
+
+system = """You are an expert at converting user questions into database queries. \
+You have access to a database of tutorial videos about a software library for building LLM-powered applications. \
+Given a question, return a list of database queries optimized to retrieve the most relevant results.
+
+If there are acronyms or words you are not familiar with, do not try to rephrase them."""
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", system),
+        ("human", "{question}"),
+    ]
+)
 
 
+# pydantic
+class Search(BaseModel):
+    """
+    定义了一个数据模型
+    """
 
+    # 内容的相似性和发布年份
+    query: str = Field(None, description='Similarity search query applied to video transcripts.')
+    publish_year: Optional[int] = Field(None, description='Year video was published')
+
+
+chain = {'question': RunnablePassthrough()} | prompt | model.with_structured_output(Search)
+
+# resp1 = chain.invoke('how do I build a RAG agent?')
+# print(resp1)
+# resp2 = chain.invoke('videos on RAG published in 2025')
+# print(resp2)
+
+
+def retrieval(search: Search) -> List[Document]:
+    _filter = None
+    if search.publish_year:
+        # 根据 publish_year,存在得到一个检索条件
+        # "$eq"是Chroma向量数据库的固定语法
+        _filter = {'publish_year': {"$eq": search.publish_year}}
+
+    return vectorstore.similarity_search(search.query, filter=_filter)
+
+new_chain = chain | retrieval
+
+# result = new_chain.invoke('videos on RAG published in 2025')
+result = new_chain.invoke('RAG tutorial')
+print([(doc.metadata['title'],doc.metadata['publish_year']) for doc in result])
